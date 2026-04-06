@@ -9,11 +9,18 @@ permissions:
   contents: write
   issues: write
 
+concurrency:
+  group: nlpm-auditor-registry
+  cancel-in-progress: false
+
 jobs:
   report:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
 
       - name: Collect pipeline state
         env:
@@ -30,10 +37,12 @@ jobs:
           }' registry/repos.json > /tmp/report/registry-stats.json
 
           # Issue counts by label
+          COUNTS="{}"
           for label in audit-candidate audit-ready audit-complete contribute-approved prs-submitted case-study-ready complete; do
             COUNT=$(gh issue list --label "$label" --state open --json number --jq 'length' 2>/dev/null || echo 0)
-            echo "\"$label\": $COUNT"
-          done | jq -s 'add' > /tmp/report/issue-counts.json 2>/dev/null || echo "{}" > /tmp/report/issue-counts.json
+            COUNTS=$(echo "$COUNTS" | jq --arg l "$label" --argjson c "$COUNT" '. + {($l): $c}')
+          done
+          echo "$COUNTS" > /tmp/report/issue-counts.json
 
           # Recent activity (last 24h)
           YESTERDAY=$(date -u -d "yesterday" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1d +%Y-%m-%dT%H:%M:%SZ)

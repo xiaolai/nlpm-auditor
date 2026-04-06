@@ -16,14 +16,21 @@ permissions:
   contents: write
   issues: write
 
+concurrency:
+  group: nlpm-auditor-registry
+  cancel-in-progress: false
+
 jobs:
   write:
     if: >
       (github.event_name == 'workflow_dispatch') ||
       (github.event.label.name == 'case-study-ready')
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
 
       - name: Extract target
         id: target
@@ -45,7 +52,7 @@ jobs:
 
       - name: Gather evidence from GitHub
         env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_REPO: ${{ steps.target.outputs.repo }}
         run: |
           mkdir -p /tmp/evidence
@@ -261,8 +268,9 @@ jobs:
       # STEP C: Verify facts against GitHub API
       # ================================================================
       - name: Verify facts
+        id: factcheck
         env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_REPO: ${{ steps.target.outputs.repo }}
         run: |
           SLUG="${TARGET_REPO//\//-}"
@@ -340,8 +348,10 @@ jobs:
             echo "=== All facts verified ==="
           fi
 
+          echo "has_errors=$([ -s /tmp/fact-check-errors.txt ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
       - name: Fix broken links (if any)
-        if: always()
+        if: steps.factcheck.outputs.has_errors == 'true'
         env:
           TARGET_REPO: ${{ steps.target.outputs.repo }}
         run: |
@@ -366,7 +376,7 @@ jobs:
           LINKS_EOF
 
       - name: Fix links with Claude Code
-        if: always()
+        if: steps.factcheck.outputs.has_errors == 'true'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -473,6 +483,8 @@ jobs:
       # STEP F: Validate mermaid syntax
       # ================================================================
       - name: Validate mermaid syntax
+        id: mermaid_check
+        continue-on-error: true
         env:
           TARGET_REPO: ${{ steps.target.outputs.repo }}
         run: |
@@ -542,7 +554,7 @@ jobs:
           PYEOF
 
       - name: Fix mermaid errors (if any)
-        if: failure()
+        if: steps.mermaid_check.outcome == 'failure'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
