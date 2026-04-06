@@ -64,7 +64,7 @@ graph LR
 
 1. Create the repo on GitHub
 2. Add secrets:
-   - `ANTHROPIC_API_KEY` — for claude-code-action
+   - `CLAUDE_CODE_OAUTH_TOKEN` — for claude-code-action
    - `PAT_TOKEN` — GitHub PAT with `public_repo` scope (for forking and PRing to other repos)
 3. Create the issue labels listed above
 4. Run `discover.yml` manually to seed the registry
@@ -80,5 +80,5 @@ case-studies/          — Polished case studies (promoted from audits)
 ## Prerequisites
 
 - GitHub Actions enabled
-- `ANTHROPIC_API_KEY` secret
+- `CLAUDE_CODE_OAUTH_TOKEN` secret
 - `PAT_TOKEN` secret with `public_repo` scope

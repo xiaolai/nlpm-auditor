@@ -90,7 +90,7 @@ Do NOT submit PRs for:
 ## Build & Run
 
 Requires:
-- `ANTHROPIC_API_KEY` secret for claude-code-action
+- `CLAUDE_CODE_OAUTH_TOKEN` secret for claude-code-action
 - `GH_TOKEN` or `GITHUB_TOKEN` with repo + public_repo scope
 - nlpm plugin installed in the action environment
 
