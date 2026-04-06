@@ -2,7 +2,7 @@ name: Track PR Status
 
 on:
   schedule:
-    - cron: '0 8 * * 3'  # Weekly Wednesday 08:00 UTC
+    - cron: '0 8 * * *'  # Daily 08:00 UTC
   workflow_dispatch:
 
 permissions:
