@@ -151,18 +151,236 @@ jobs:
           prompt_file: /tmp/case-study-prompt.md
           allowed_tools: Read,Glob,Grep,Write,Bash
 
-      - name: Polish prose — ornate wording pass
+      # ================================================================
+      # STEP A: Self-Review — 6 perspectives (replaces external Codex review)
+      # ================================================================
+      - name: Prepare self-review prompt
         env:
           TARGET_REPO: ${{ steps.target.outputs.repo }}
         run: |
           SLUG="${TARGET_REPO//\//-}"
+          cat > /tmp/self-review-prompt.md <<'REVIEW_EOF'
+          You are a critical reviewer. Read the case study draft and evaluate it from 6 perspectives.
+          Write your findings to /tmp/review-findings.md.
+
+          Read the article at case-studies/SLUG_PLACEHOLDER.md
+
+          ## Perspective 1: Technical Accuracy
+          - Are claims about YAML behavior, Claude Code runtime, and scoring correct?
+          - Do penalty values match NLPM's actual rubric?
+          - Are PR descriptions technically sound?
+
+          ## Perspective 2: Narrative Structure
+          - Does the story flow logically?
+          - Are there pacing problems — sections that drag or rush?
+          - Is there a timing/math inconsistency anywhere?
+
+          ## Perspective 3: Journalistic Integrity
+          - Are there claims not substantiated by the evidence files?
+          - Is the maintainer's perspective fairly represented?
+          - Are failures given appropriate weight vs successes?
+
+          ## Perspective 4: Marketing Bias
+          - Does it read as an NLPM ad disguised as a case study?
+          - Are metrics cherry-picked or selectively presented?
+          - Is the significance oversold?
+
+          ## Perspective 5: Missing Context
+          - What would a maintainer want readers to know that's not here?
+          - Is there fairness context about the project's development pace?
+
+          ## Perspective 6: Counterarguments
+          - Could any "defects" be intentional design choices?
+          - Are NLPM's rules themselves debatable here?
+          - Is the score framed more negatively than warranted?
+
+          ## Output Format
+
+          Write to /tmp/review-findings.md:
+
+          For each perspective:
+          ### Perspective N: Name
+          | # | Severity | Finding | Recommendation |
+          |---|----------|---------|----------------|
+
+          Then:
+          ### Top 5 Issues (by credibility impact)
+          ### Strengths
+          REVIEW_EOF
+
+          sed -i "s/SLUG_PLACEHOLDER/$SLUG/g" /tmp/self-review-prompt.md 2>/dev/null || \
+          sed -i '' "s/SLUG_PLACEHOLDER/$SLUG/g" /tmp/self-review-prompt.md
+
+      - name: Self-review with Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt_file: /tmp/self-review-prompt.md
+          allowed_tools: Read,Glob,Grep,Write
+
+      # ================================================================
+      # STEP B: Apply review fixes
+      # ================================================================
+      - name: Prepare fix prompt
+        env:
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+        run: |
+          SLUG="${TARGET_REPO//\//-}"
+          cat > /tmp/apply-fixes-prompt.md <<FIXES_EOF
+          You are an editor. Read the review findings at /tmp/review-findings.md and the article at case-studies/$SLUG.md.
+
+          Apply fixes for every HIGH and CRITICAL finding. For MEDIUM findings, apply if the fix is clear.
+
+          ## Fix categories
+
+          **Technical accuracy**: correct any factual errors. Cross-check against /tmp/evidence/*.json.
+          **Timing errors**: verify all timestamps against PR/issue creation dates in /tmp/evidence/prs.json and /tmp/evidence/issues.json.
+          **Missing name: nuance**: if the article claims missing name: is a "guaranteed crash", soften to "non-canonical, portability concern" — Claude Code may fall back to filename.
+          **Scalar-string tools:**: if flagged as a bug, reframe as convention preference and note NLPM v0.7.0 accepts both formats.
+          **Score framing**: if 74/100 (or similar) is framed negatively, add that it passes the default 70 threshold.
+          **Missing fairness note**: if absent, add one acknowledging the project's development pace and quality orientation.
+          **Missing disclosure**: if the disclosure blockquote is absent, add it.
+          **Missing limitations section**: if absent, add one with 3-4 caveats.
+          **Oversold significance**: tone down if the closing is too strong.
+
+          ## Rules
+          - Use Edit tool — surgical fixes, not rewrites
+          - Do NOT change mermaid blocks
+          - Do NOT remove content that's accurate
+          - Do NOT add new sections beyond what the review recommends
+          FIXES_EOF
+
+      - name: Apply fixes with Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt_file: /tmp/apply-fixes-prompt.md
+          allowed_tools: Read,Edit,Grep
+
+      # ================================================================
+      # STEP C: Verify facts against GitHub API
+      # ================================================================
+      - name: Verify facts
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+        run: |
+          SLUG="${TARGET_REPO//\//-}"
           ARTICLE="case-studies/${SLUG}.md"
+          ERRORS=0
 
           if [ ! -f "$ARTICLE" ]; then
-            echo "No article found at $ARTICLE — skipping polish"
+            echo "No article — skipping fact check"
             exit 0
           fi
 
+          echo "=== Fact-checking $ARTICLE ==="
+          > /tmp/fact-check-errors.txt
+
+          # Check 1: Verify all GitHub PR/issue links resolve
+          grep -oP 'https://github\.com/[^/]+/[^/]+/(pull|issues)/\d+' "$ARTICLE" | sort -u | while read -r url; do
+            REPO_PATH=$(echo "$url" | sed 's|https://github.com/||' | sed 's|/pull/|/pulls/|' | sed 's|/issues/|/issues/|')
+            TYPE=$(echo "$url" | grep -oP '(pull|issues)')
+            NUM=$(echo "$url" | grep -oP '\d+$')
+            API_REPO=$(echo "$url" | sed 's|https://github.com/||' | sed 's|/pull/.*||' | sed 's|/issues/.*||')
+
+            if [ "$TYPE" = "pull" ]; then
+              STATUS=$(gh pr view "$NUM" --repo "$API_REPO" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+            else
+              STATUS=$(gh issue view "$NUM" --repo "$API_REPO" --json state --jq '.state' 2>/dev/null || echo "NOT_FOUND")
+            fi
+
+            if [ "$STATUS" = "NOT_FOUND" ]; then
+              echo "BROKEN LINK: $url" | tee -a /tmp/fact-check-errors.txt
+              ERRORS=$((ERRORS + 1))
+            else
+              echo "OK: $url ($STATUS)"
+            fi
+            sleep 0.5
+          done
+
+          # Check 2: Verify commit links
+          grep -oP 'https://github\.com/[^/]+/[^/]+/commit/[a-f0-9]+' "$ARTICLE" | sort -u | while read -r url; do
+            SHA=$(echo "$url" | grep -oP '[a-f0-9]+$')
+            API_REPO=$(echo "$url" | sed 's|https://github.com/||' | sed 's|/commit/.*||')
+            STATUS=$(gh api "repos/$API_REPO/commits/$SHA" --jq '.sha' 2>/dev/null || echo "NOT_FOUND")
+
+            if [ "$STATUS" = "NOT_FOUND" ]; then
+              echo "BROKEN COMMIT LINK: $url" | tee -a /tmp/fact-check-errors.txt
+              ERRORS=$((ERRORS + 1))
+            else
+              echo "OK: $url"
+            fi
+            sleep 0.5
+          done
+
+          # Check 3: Verify repo links
+          grep -oP 'https://github\.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+(?=\))' "$ARTICLE" | sort -u | while read -r url; do
+            REPO_NAME=$(echo "$url" | sed 's|https://github.com/||')
+            # Skip if it's a PR/issue/commit link (already checked)
+            echo "$REPO_NAME" | grep -qP '(pull|issues|commit)' && continue
+            STATUS=$(gh api "repos/$REPO_NAME" --jq '.full_name' 2>/dev/null || echo "NOT_FOUND")
+
+            if [ "$STATUS" = "NOT_FOUND" ]; then
+              echo "BROKEN REPO LINK: $url" | tee -a /tmp/fact-check-errors.txt
+              ERRORS=$((ERRORS + 1))
+            else
+              echo "OK: $url"
+            fi
+            sleep 0.5
+          done
+
+          if [ -s /tmp/fact-check-errors.txt ]; then
+            echo ""
+            echo "=== FACT CHECK FAILURES ==="
+            cat /tmp/fact-check-errors.txt
+            echo "Errors will be fixed in next step"
+          else
+            echo ""
+            echo "=== All facts verified ==="
+          fi
+
+      - name: Fix broken links (if any)
+        if: always()
+        env:
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+        run: |
+          if [ ! -s /tmp/fact-check-errors.txt ]; then
+            echo "No fact-check errors — skipping"
+            exit 0
+          fi
+
+          SLUG="${TARGET_REPO//\//-}"
+          cat > /tmp/fix-links-prompt.md <<LINKS_EOF
+          Broken links were found in the article.
+          Read /tmp/fact-check-errors.txt for the list.
+          Read the article at case-studies/$SLUG.md.
+
+          For each broken link:
+          - If it's a wrong PR/issue number: check /tmp/evidence/prs.json and issues.json for the correct number
+          - If it's a wrong repo path: check /tmp/evidence/repo.json for the correct name
+          - If it's a wrong commit SHA: check /tmp/evidence/commits.json for the correct SHA
+          - If the link simply doesn't exist: remove the link but keep the text
+
+          Use Edit tool for surgical fixes only.
+          LINKS_EOF
+
+      - name: Fix links with Claude Code
+        if: always()
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt_file: /tmp/fix-links-prompt.md
+          allowed_tools: Read,Edit,Grep
+
+      # ================================================================
+      # STEP D: Polish prose — ornate wording
+      # ================================================================
+      - name: Prepare polish prompt
+        env:
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+        run: |
+          SLUG="${TARGET_REPO//\//-}"
           cat > /tmp/polish-prompt.md <<'POLISH_EOF'
           You are a prose polisher. Read the case study article and add literary texture.
 
@@ -182,29 +400,40 @@ jobs:
 
           **Punch lines** — reward the reader at key moments:
           - "Sometimes the sequel is shorter than the blooper reel"
-          - After a duplicate PR: "In open source, it's perfectly fine to arrive second with the right answer"
+          - "In open source, it's perfectly fine to arrive second with the right answer"
 
           **Witty observations** — gentle, never sarcastic:
           - "missing its own name" (for a command without a name: field)
           - "a quiet acknowledgment that the diagnosis came from somewhere worth naming"
 
+          **Light jokes** — only where the narrative earns one:
+          - After a failure: a self-deprecating quip
+          - After an ironic outcome: note the irony gently
+
+          ## Where to place them
+
+          1. **Title** — creative, not generic ("When the Linter Met Its Match" not "NLPM Audit Report")
+          2. **Opening** — the first paragraph after disclosure sets the tone
+          3. **After failures** — the parallel agent mess, rejected PRs, duplicate closures
+          4. **Transition sentences** — between major sections
+          5. **The fairness note** — warmth, not formality
+          6. **Closing paragraph** — the most memorable line in the piece goes here
+
           ## Rules
 
           - SOFT TONE — never presumptuous, never mocking the target project
           - Polite — these are other people's hard work
-          - Place touches at narrative beats, not randomly
-          - Do NOT add ornament to technical tables, code blocks, or data
-          - Do NOT change any facts, numbers, links, or mermaid blocks
+          - Do NOT add ornament to technical tables, code blocks, mermaid blocks, or data
+          - Do NOT change any facts, numbers, links, or evidence
           - Do NOT add more than 15 touches — restraint is elegance
-          - The title should be creative (not "NLPM Audit of X" — something that hints at the story)
-          - The closing paragraph deserves a memorable final line
+          - Each touch must serve the narrative, not just decorate
 
           ## Process
 
-          1. Read the article
-          2. Identify the 10-15 best spots for literary touches
-          3. Apply edits using the Edit tool
-          4. Do NOT rewrite sections — add phrases, swap adjectives, insert one-liners
+          1. Read the full article
+          2. Identify the 10-15 strongest spots for literary touches
+          3. Apply each using the Edit tool — add phrases, swap adjectives, insert one-liners
+          4. Do NOT rewrite paragraphs — this is seasoning, not cooking
           POLISH_EOF
 
       - name: Polish with Claude Code
@@ -214,6 +443,35 @@ jobs:
           prompt_file: /tmp/polish-prompt.md
           allowed_tools: Read,Edit,Grep
 
+      # ================================================================
+      # STEP E: Validate all links (final pass after polish)
+      # ================================================================
+      - name: Final link validation
+        env:
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+        run: |
+          SLUG="${TARGET_REPO//\//-}"
+          ARTICLE="case-studies/${SLUG}.md"
+
+          [ ! -f "$ARTICLE" ] && exit 0
+
+          # Check for bare #NNNN references that should be linked
+          BARE=$(grep -nP '[^[(]#\d{4}' "$ARTICLE" || true)
+          if [ -n "$BARE" ]; then
+            echo "WARNING: Bare issue/PR references found (should be linked):"
+            echo "$BARE"
+          fi
+
+          # Count GitHub links as a sanity check
+          LINK_COUNT=$(grep -c 'https://github.com/' "$ARTICLE" || echo 0)
+          echo "Total GitHub links: $LINK_COUNT"
+
+          # Check for duplicate consecutive links (common polish artifact)
+          grep -nP '(\[.*?\]\(https://github\.com/[^)]+\)).*\1' "$ARTICLE" && echo "WARNING: Duplicate links found" || echo "No duplicate links"
+
+      # ================================================================
+      # STEP F: Validate mermaid syntax
+      # ================================================================
       - name: Validate mermaid syntax
         env:
           TARGET_REPO: ${{ steps.target.outputs.repo }}
@@ -221,14 +479,10 @@ jobs:
           SLUG="${TARGET_REPO//\//-}"
           ARTICLE="case-studies/${SLUG}.md"
 
-          if [ ! -f "$ARTICLE" ]; then
-            echo "No article — skipping mermaid validation"
-            exit 0
-          fi
+          [ ! -f "$ARTICLE" ] && { echo "No article — skipping"; exit 0; }
 
-          # Extract all mermaid blocks
           python3 << 'PYEOF'
-          import re, sys, os, subprocess, json
+          import re, sys, os
 
           slug = os.environ.get("TARGET_REPO", "").replace("/", "-")
           path = f"case-studies/{slug}.md"
@@ -246,55 +500,45 @@ jobs:
           errors = []
 
           for i, block in enumerate(blocks):
-              # Basic syntax checks
-              block_stripped = block.strip()
-              first_line = block_stripped.split('\n')[0].strip()
+              b = block.strip()
+              first = b.split('\n')[0].strip()
 
-              valid_starts = ['graph ', 'flowchart ', 'sequenceDiagram', 'classDiagram',
-                              'stateDiagram', 'erDiagram', 'gantt', 'pie ', 'pie\n',
-                              'journey', 'gitGraph', 'mindmap', 'timeline',
-                              'quadrantChart', 'xychart', 'sankey', 'block']
+              valid = ['graph ', 'flowchart ', 'sequenceDiagram', 'classDiagram',
+                       'stateDiagram', 'erDiagram', 'gantt', 'pie ', 'pie\n',
+                       'journey', 'gitGraph', 'mindmap', 'timeline',
+                       'quadrantChart', 'xychart', 'sankey', 'block']
 
-              if not any(first_line.startswith(s) or first_line == s.strip() for s in valid_starts):
-                  errors.append(f"Block {i+1}: unrecognized diagram type '{first_line}'")
+              if not any(first.startswith(s) or first == s.strip() for s in valid):
+                  errors.append(f"Block {i+1}: unrecognized type '{first}'")
                   continue
 
-              # Gantt-specific checks
-              if first_line == 'gantt':
-                  if 'dateFormat' not in block_stripped:
-                      errors.append(f"Block {i+1} (gantt): missing dateFormat")
-                  if 'section' not in block_stripped:
-                      errors.append(f"Block {i+1} (gantt): missing section")
+              if first == 'gantt':
+                  if 'dateFormat' not in b: errors.append(f"Block {i+1} (gantt): missing dateFormat")
+                  if 'section' not in b: errors.append(f"Block {i+1} (gantt): missing section")
 
-              # Pie-specific checks
-              if first_line.startswith('pie'):
-                  lines = [l.strip() for l in block_stripped.split('\n')[1:] if l.strip()]
-                  for line in lines:
+              if first.startswith('pie'):
+                  for line in [l.strip() for l in b.split('\n')[1:] if l.strip()]:
                       if line.startswith('"') and ':' not in line:
-                          errors.append(f"Block {i+1} (pie): malformed entry '{line}' — needs : value")
+                          errors.append(f"Block {i+1} (pie): malformed '{line}'")
 
-              # Sequence diagram checks
-              if first_line == 'sequenceDiagram':
-                  if 'participant' not in block_stripped and '->>' not in block_stripped:
+              if first == 'sequenceDiagram':
+                  if 'participant' not in b and '->>' not in b:
                       errors.append(f"Block {i+1} (sequence): no participants or messages")
 
-              # Graph/flowchart checks
-              if first_line.startswith('graph') or first_line.startswith('flowchart'):
-                  if '-->' not in block_stripped and '---' not in block_stripped:
-                      errors.append(f"Block {i+1} (graph): no edges defined")
+              if first.startswith(('graph', 'flowchart')):
+                  if '-->' not in b and '---' not in b:
+                      errors.append(f"Block {i+1} (graph): no edges")
 
-              print(f"Block {i+1} ({first_line}): basic syntax OK")
+              print(f"Block {i+1} ({first}): OK")
 
           if errors:
-              print(f"\nERRORS FOUND ({len(errors)}):")
-              for e in errors:
-                  print(f"  - {e}")
-              # Write errors for the fix step
+              print(f"\n{len(errors)} ERROR(S):")
+              for e in errors: print(f"  - {e}")
               with open('/tmp/mermaid-errors.txt', 'w') as f:
                   f.write('\n'.join(errors))
               sys.exit(1)
           else:
-              print("\nAll mermaid blocks passed validation")
+              print("\nAll mermaid blocks valid")
           PYEOF
 
       - name: Fix mermaid errors (if any)
@@ -303,15 +547,13 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            Mermaid syntax errors were found in the case study article.
-            Read /tmp/mermaid-errors.txt for the error list.
-            Read the article and fix each mermaid block that has errors.
-            Common fixes:
-            - gantt: add dateFormat YYYY-MM-DD HH:mm and axisFormat %H:%M
-            - pie: ensure every entry has "label" : value format
-            - graph: ensure edges use --> or ---
-            - sequenceDiagram: ensure participants are declared
-            Do NOT change any non-mermaid content.
+            Mermaid syntax errors were found. Read /tmp/mermaid-errors.txt.
+            Fix each broken block in the article. Common fixes:
+            - gantt: dateFormat YYYY-MM-DD HH:mm, axisFormat %H:%M
+            - pie: "label" : value format
+            - graph: edges use -->
+            - sequenceDiagram: declare participants
+            Do NOT change non-mermaid content.
           allowed_tools: Read,Edit,Grep
 
       - name: Generate and compress cover image
