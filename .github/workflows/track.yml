@@ -1,0 +1,66 @@
+name: Track PR Status
+
+on:
+  schedule:
+    - cron: '0 8 * * 3'  # Weekly Wednesday 08:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check submitted PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          jq -c '.repos | to_entries[] | select(.value.status == "contributed")' registry/repos.json | while read -r entry; do
+            REPO=$(echo "$entry" | jq -r '.key')
+            ISSUE_NUM=$(echo "$entry" | jq -r '.value.audit_issue')
+            echo "Checking PRs for $REPO..."
+
+            PRS=$(gh pr list --repo "$REPO" --author xiaolai --state all \
+              --json number,state,mergedAt,closedAt,title \
+              --jq '[.[] | {number, state, mergedAt, closedAt, title}]' 2>/dev/null || echo "[]")
+
+            MERGED=$(echo "$PRS" | jq '[.[] | select(.state == "MERGED")] | length')
+            CLOSED=$(echo "$PRS" | jq '[.[] | select(.state == "CLOSED" and .mergedAt == null)] | length')
+            OPEN=$(echo "$PRS" | jq '[.[] | select(.state == "OPEN")] | length')
+            echo "  $MERGED merged, $CLOSED closed, $OPEN open"
+
+            jq --arg name "$REPO" --argjson prs "$PRS" \
+               '.repos[$name].prs = $prs' \
+               registry/repos.json > /tmp/reg.json && mv /tmp/reg.json registry/repos.json
+
+            if [ "$OPEN" -eq 0 ] && [ "$(echo "$PRS" | jq length)" -gt 0 ]; then
+              jq --arg name "$REPO" '.repos[$name].status = "tracked"' \
+                 registry/repos.json > /tmp/reg.json && mv /tmp/reg.json registry/repos.json
+
+              if [ "$MERGED" -gt 0 ]; then
+                jq --arg name "$REPO" '.repos[$name].case_study_candidate = true' \
+                   registry/repos.json > /tmp/reg.json && mv /tmp/reg.json registry/repos.json
+
+                if [ "$ISSUE_NUM" != "null" ] && [ "$ISSUE_NUM" != "0" ]; then
+                  gh issue comment "$ISSUE_NUM" \
+                    --body "All PRs resolved. $MERGED merged, $CLOSED closed. Ready for case study." \
+                    2>/dev/null || true
+                  gh issue edit "$ISSUE_NUM" --add-label "case-study-ready" 2>/dev/null || true
+                fi
+              fi
+            fi
+          done
+
+      - name: Commit
+        run: |
+          git config user.name "nlpm-auditor[bot]"
+          git config user.email "nlpm-auditor[bot]@users.noreply.github.com"
+          git add registry/repos.json
+          git diff --cached --quiet || {
+            git commit -m "chore: PR status update $(date +%Y-%m-%d)"
+            git push
+          }

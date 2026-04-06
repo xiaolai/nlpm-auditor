@@ -1,0 +1,176 @@
+name: Audit Repo
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'Repo to audit (owner/name)'
+        required: true
+      issue_number:
+        description: 'Tracking issue number'
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  audit:
+    if: >
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.label.name == 'audit-ready')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract target repo
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_REPO: ${{ inputs.repo }}
+          INPUT_ISSUE: ${{ inputs.issue_number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "repo=$INPUT_REPO" >> "$GITHUB_OUTPUT"
+            echo "issue=$INPUT_ISSUE" >> "$GITHUB_OUTPUT"
+          else
+            # Extract repo name from issue title: "Audit candidate: owner/name"
+            REPO=$(echo "$ISSUE_TITLE" | sed 's/Audit candidate: //')
+            echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+            echo "issue=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Clone target repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+        run: |
+          git clone --depth 1 "https://github.com/$TARGET_REPO.git" /tmp/target-repo
+
+      - name: Count artifacts
+        id: count
+        run: |
+          cd /tmp/target-repo
+          AGENTS=$(find . -path '*/agents/*.md' 2>/dev/null | wc -l | tr -d ' ')
+          COMMANDS=$(find . -path '*/commands/*.md' 2>/dev/null | wc -l | tr -d ' ')
+          SKILLS=$(find . -name 'SKILL.md' 2>/dev/null | wc -l | tr -d ' ')
+          HOOKS=$(find . -path '*/hooks/*.json' 2>/dev/null | wc -l | tr -d ' ')
+          TOTAL=$((AGENTS + COMMANDS + SKILLS + HOOKS))
+          echo "agents=$AGENTS" >> "$GITHUB_OUTPUT"
+          echo "commands=$COMMANDS" >> "$GITHUB_OUTPUT"
+          echo "skills=$SKILLS" >> "$GITHUB_OUTPUT"
+          echo "hooks=$HOOKS" >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare audit prompt
+        id: prompt
+        env:
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+          ISSUE_NUM: ${{ steps.target.outputs.issue }}
+          AGENT_COUNT: ${{ steps.count.outputs.agents }}
+          CMD_COUNT: ${{ steps.count.outputs.commands }}
+          SKILL_COUNT: ${{ steps.count.outputs.skills }}
+          HOOK_COUNT: ${{ steps.count.outputs.hooks }}
+        run: |
+          cat > /tmp/audit-prompt.md <<'PROMPT_EOF'
+          You are an NLPM auditor. Score NL programming artifacts in the repo cloned at /tmp/target-repo.
+
+          ## Instructions
+
+          1. Read ALL NL artifact files (agents/*.md, commands/**/*.md, skills/**/SKILL.md, hooks/*.json, CLAUDE.md, .claude-plugin/plugin.json)
+
+          2. Score each on NLPM's 100-point scale. Key penalties:
+             - Missing required frontmatter (name, description): -25 each
+             - Missing <example> blocks on agents: -15 (zero) or -5 (one)
+             - Model not declared: -5
+             - Missing output format: -10
+             - Missing allowed-tools on commands: -5
+             - Multi-step without numbered steps: -10
+             - No empty input handling: -10
+             - Vague quantifiers: -2 each, cap -20
+             - Write/Edit on read-only agents: -10
+             - Unused tools: -3 each
+
+          3. Cross-component checks: broken partial/skill/script references, orphans, contradictions
+
+          4. Classify findings:
+             - BUGS: Missing fields that break registration, tools called but not in allowed-tools, broken references
+             - QUALITY: Missing examples, vague language, model tier, output format
+             - Do NOT classify format preferences (scalar-string tools:) as bugs
+
+          5. Write the audit report to the file path shown below. Use this structure:
+
+             # NLPM Audit: {repo}
+             **Date**: {today}  |  **Artifacts**: {count}  |  **Score**: {avg}/100
+             **Bugs**: {N}  |  **Quality Issues**: {N}
+
+             ## Score Summary
+             | File | Type | Score | Top Issue |
+
+             ## Bugs (PR-worthy)
+             | # | File | Issue | Impact |
+
+             ## Quality Issues (informational)
+             | # | File | Issue | Penalty |
+
+             ## Cross-Component
+             {findings}
+
+             ## Recommendation
+             {submit PRs? how many? which bugs?}
+
+          PROMPT_EOF
+
+          echo "prompt_file=/tmp/audit-prompt.md" >> "$GITHUB_OUTPUT"
+
+      - name: Audit with Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt_file: /tmp/audit-prompt.md
+          allowed_tools: Read,Glob,Grep,Write,Bash
+
+      - name: Commit audit report
+        env:
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+        run: |
+          OWNER=$(echo "$TARGET_REPO" | cut -d/ -f1)
+          mkdir -p "audits/$OWNER"
+
+          # Move any generated audit files
+          find . -name "*.md" -newer .git/HEAD -not -path './.github/*' -not -path './CLAUDE.md' -not -path './README.md' | while read -r f; do
+            if grep -q "NLPM Audit" "$f" 2>/dev/null; then
+              DEST="audits/${TARGET_REPO//\//-}.md"
+              mv "$f" "$DEST" 2>/dev/null || true
+            fi
+          done
+
+          git config user.name "nlpm-auditor[bot]"
+          git config user.email "nlpm-auditor[bot]@users.noreply.github.com"
+          git add audits/ registry/
+          git diff --cached --quiet || {
+            git commit -m "audit: $TARGET_REPO"
+            git push
+          }
+
+      - name: Update registry and label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+          ISSUE_NUM: ${{ steps.target.outputs.issue }}
+        run: |
+          jq --arg name "$TARGET_REPO" \
+             '.repos[$name].status = "audited"' \
+             registry/repos.json > /tmp/reg.json && mv /tmp/reg.json registry/repos.json
+
+          git add registry/repos.json
+          git diff --cached --quiet || {
+            git commit -m "chore: mark $TARGET_REPO as audited"
+            git push
+          }
+
+          gh issue edit "$ISSUE_NUM" --add-label "audit-complete" --remove-label "audit-ready" 2>/dev/null || true

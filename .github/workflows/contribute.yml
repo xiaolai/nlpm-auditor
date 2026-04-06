@@ -1,0 +1,127 @@
+name: Contribute PRs
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'Target repo (owner/name)'
+        required: true
+      issue_number:
+        description: 'Tracking issue number in this repo'
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  contribute:
+    if: >
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.label.name == 'contribute-approved')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract target
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_REPO: ${{ inputs.repo }}
+          INPUT_ISSUE: ${{ inputs.issue_number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "repo=$INPUT_REPO" >> "$GITHUB_OUTPUT"
+            echo "issue=$INPUT_ISSUE" >> "$GITHUB_OUTPUT"
+          else
+            REPO=$(echo "$ISSUE_TITLE" | sed 's/Audit candidate: //')
+            echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+            echo "issue=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Load audit report
+        id: report
+        env:
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+        run: |
+          REPORT_PATH="audits/${TARGET_REPO//\//-}.md"
+          if [ ! -f "$REPORT_PATH" ]; then
+            echo "No audit report found at $REPORT_PATH"
+            exit 1
+          fi
+          echo "report_path=$REPORT_PATH" >> "$GITHUB_OUTPUT"
+
+          # Write contribution prompt to a file (no shell injection possible)
+          TARGET_NAME=$(echo "$TARGET_REPO" | cut -d/ -f2)
+          cat > /tmp/contribute-prompt.md <<PROMPT_EOF
+          You are submitting PRs to fix verified bugs in a Claude Code plugin repo.
+
+          Target repo: $TARGET_REPO
+          Audit report: read the file at $REPORT_PATH in this repo's checkout.
+          Fork name: xiaolai/$TARGET_NAME
+
+          ## Instructions
+
+          1. Read the audit report. Identify ONLY items in the "Bugs (PR-worthy)" section.
+
+          2. Check contribution guidelines:
+             Run: gh api repos/$TARGET_REPO/contents/CONTRIBUTING.md --jq .name 2>/dev/null
+
+          3. Fork the repo if not already forked:
+             Run: gh repo fork $TARGET_REPO --clone -- /tmp/contribution
+
+          4. For each bug (max 5):
+             a. Create branch: fix/nlpm-{short-description}
+             b. Read the file, understand existing format
+             c. Make the minimal fix matching repo style
+             d. Commit with conventional message
+             e. Push to fork
+             f. Create PR with clear explanation and NLPM methodology reference
+
+          5. Create tracking issue in the TARGET repo explaining:
+             - NLPM methodology and scoring
+             - All bugs found with priority
+             - Links to all PRs
+             - Polite, acknowledge project quality
+
+          6. Comment on issue in THIS repo with links to all PRs and tracking issue.
+
+          ## Rules
+          - ONLY fix "Bugs" items — never quality/convention issues
+          - Match target repo style exactly
+          - Be polite and respectful
+          - Max 5 PRs
+          PROMPT_EOF
+
+      - name: Contribute with Claude Code
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt_file: /tmp/contribute-prompt.md
+          allowed_tools: Read,Glob,Grep,Write,Edit,Bash
+
+      - name: Update registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+          ISSUE_NUM: ${{ steps.target.outputs.issue }}
+        run: |
+          jq --arg name "$TARGET_REPO" \
+             '.repos[$name].status = "contributed"' \
+             registry/repos.json > /tmp/reg.json && mv /tmp/reg.json registry/repos.json
+
+          git config user.name "nlpm-auditor[bot]"
+          git config user.email "nlpm-auditor[bot]@users.noreply.github.com"
+          git add registry/repos.json
+          git diff --cached --quiet || {
+            git commit -m "chore: mark $TARGET_REPO as contributed"
+            git push
+          }
+
+          gh issue edit "$ISSUE_NUM" --add-label "prs-submitted" --remove-label "contribute-approved" 2>/dev/null || true
