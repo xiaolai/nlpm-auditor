@@ -137,21 +137,27 @@ jobs:
                registry/repos.json > /tmp/reg.json && mv /tmp/reg.json registry/repos.json
           fi
 
-      - name: Update registry
+      - name: Log, update registry, label
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_REPO: ${{ steps.target.outputs.repo }}
           ISSUE_NUM: ${{ steps.target.outputs.issue }}
         run: |
+          source scripts/log-event.sh
+
+          PR_COUNT=0
+          [ -f /tmp/created-prs.json ] && PR_COUNT=$(jq length /tmp/created-prs.json)
+          log_event "contribute" "prs_submitted" "{\"repo\": \"$TARGET_REPO\", \"pr_count\": $PR_COUNT}"
+
           jq --arg name "$TARGET_REPO" \
              '.repos[$name].status = "contributed"' \
              registry/repos.json > /tmp/reg.json && mv /tmp/reg.json registry/repos.json
 
           git config user.name "nlpm-auditor[bot]"
           git config user.email "nlpm-auditor[bot]@users.noreply.github.com"
-          git add registry/repos.json
+          git add registry/repos.json logs/events.jsonl
           git diff --cached --quiet || {
-            git commit -m "chore: mark $TARGET_REPO as contributed"
+            git commit -m "contribute: $TARGET_REPO ($PR_COUNT PRs)"
             git push
           }
 

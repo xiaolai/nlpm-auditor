@@ -641,7 +641,7 @@ jobs:
           PYEOF
           fi
 
-      - name: Commit and close
+      - name: Log, commit, and close
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_REPO: ${{ steps.target.outputs.repo }}
@@ -650,11 +650,20 @@ jobs:
           SLUG="${TARGET_REPO//\//-}"
           DATE=$(date +%Y-%m-%d)
 
+          source scripts/log-event.sh
+
+          ARTICLE="case-studies/${DATE}-${SLUG}.md"
+          LINES=0
+          [ -f "$ARTICLE" ] && LINES=$(wc -l < "$ARTICLE" | tr -d ' ')
+          HAS_IMAGE=$([ -f "case-studies/images/${DATE}-${SLUG}-cover.png" ] || [ -f "case-studies/images/${DATE}-${SLUG}-cover.jpg" ] && echo true || echo false)
+
+          log_event "case-study" "published" "{\"repo\": \"$TARGET_REPO\", \"article_lines\": $LINES, \"has_cover\": $HAS_IMAGE}"
+
           git config user.name "nlpm-auditor[bot]"
           git config user.email "nlpm-auditor[bot]@users.noreply.github.com"
-          git add case-studies/
+          git add case-studies/ logs/events.jsonl
           git diff --cached --quiet || {
-            git commit -m "case-study: $TARGET_REPO"
+            git commit -m "case-study: $TARGET_REPO ($LINES lines)"
             git push
           }
 

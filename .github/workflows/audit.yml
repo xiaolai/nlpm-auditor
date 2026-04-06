@@ -158,27 +158,26 @@ jobs:
             fi
           done
 
-          git config user.name "nlpm-auditor[bot]"
-          git config user.email "nlpm-auditor[bot]@users.noreply.github.com"
-          git add audits/ registry/
-          git diff --cached --quiet || {
-            git commit -m "audit: $TARGET_REPO"
-            git push
-          }
+          source scripts/log-event.sh
 
-      - name: Update registry and label
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TARGET_REPO: ${{ steps.target.outputs.repo }}
-          ISSUE_NUM: ${{ steps.target.outputs.issue }}
-        run: |
-          jq --arg name "$TARGET_REPO" \
-             '.repos[$name].status = "audited"' \
+          # Extract score from report if available
+          REPORT="audits/${TARGET_REPO//\//-}.md"
+          SCORE="null"
+          if [ -f "$REPORT" ]; then
+            SCORE=$(grep -oP 'Score.*?(\d+)/100' "$REPORT" | head -1 | grep -oP '\d+(?=/100)' || echo "null")
+          fi
+
+          log_event "audit" "audit_complete" "{\"repo\": \"$TARGET_REPO\", \"score\": $SCORE, \"artifacts\": $TOTAL}"
+
+          jq --arg name "$TARGET_REPO" --argjson score "$SCORE" \
+             '.repos[$name].status = "audited" | .repos[$name].score = $score' \
              registry/repos.json > /tmp/reg.json && mv /tmp/reg.json registry/repos.json
 
-          git add registry/repos.json
+          git config user.name "nlpm-auditor[bot]"
+          git config user.email "nlpm-auditor[bot]@users.noreply.github.com"
+          git add audits/ registry/ logs/events.jsonl
           git diff --cached --quiet || {
-            git commit -m "chore: mark $TARGET_REPO as audited"
+            git commit -m "audit: $TARGET_REPO ($SCORE/100)"
             git push
           }
 
