@@ -126,13 +126,19 @@ jobs:
           9. **Limitations** — what this doesn't prove
           10. **Significance** — measured, not inflated
 
-          ## Style Rules
-          - Soft, polite tone — never presumptuous
-          - Similes and metaphors sparingly
+          ## Style Rules (first draft)
+          - Write clean, factual prose first — ornate wording comes in the polish pass
           - ALL links from evidence files — never fabricate URLs
           - ALL numbers from evidence files — never guess
-          - Mermaid gantt: use dateFormat YYYY-MM-DD HH:mm
           - If evidence is missing for a section, say so honestly
+
+          ## Mermaid Diagram Requirements
+          - Score distribution: mermaid pie chart
+          - Timeline: mermaid gantt chart (dateFormat YYYY-MM-DD HH:mm, axisFormat %H:%M)
+          - PR priority grouping: mermaid graph LR with colored subgraphs if 3+ priority tiers
+          - Parallel/sequential failure: mermaid sequenceDiagram if applicable
+          - Find ANY data that would be clearer as a diagram than a table — use mermaid
+          - Do NOT use ASCII art or text-based diagrams — always mermaid
 
           ## Also write
           - /tmp/case-study-summary.txt: one-line summary for the issue comment
@@ -144,6 +150,169 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt_file: /tmp/case-study-prompt.md
           allowed_tools: Read,Glob,Grep,Write,Bash
+
+      - name: Polish prose — ornate wording pass
+        env:
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+        run: |
+          SLUG="${TARGET_REPO//\//-}"
+          ARTICLE="case-studies/${SLUG}.md"
+
+          if [ ! -f "$ARTICLE" ]; then
+            echo "No article found at $ARTICLE — skipping polish"
+            exit 0
+          fi
+
+          cat > /tmp/polish-prompt.md <<'POLISH_EOF'
+          You are a prose polisher. Read the case study article and add literary texture.
+
+          ## What to add (sparingly — 8-15 touches total)
+
+          **Similes** — compare technical concepts to everyday things:
+          - "like handing someone a magnifying glass and pointing at a building"
+          - "like a bridge with 80 bolts where 5 are missing"
+
+          **Metaphors** — make abstract things concrete:
+          - "a mirror as much as a microscope"
+          - "the git equivalent of five chefs sharing one cutting board"
+
+          **Analogies** — connect unfamiliar to familiar:
+          - "discovered defects the way you discover a hole in your umbrella — by getting rained on"
+          - "like a receptionist who only says 'ask the person down the hall'"
+
+          **Punch lines** — reward the reader at key moments:
+          - "Sometimes the sequel is shorter than the blooper reel"
+          - After a duplicate PR: "In open source, it's perfectly fine to arrive second with the right answer"
+
+          **Witty observations** — gentle, never sarcastic:
+          - "missing its own name" (for a command without a name: field)
+          - "a quiet acknowledgment that the diagnosis came from somewhere worth naming"
+
+          ## Rules
+
+          - SOFT TONE — never presumptuous, never mocking the target project
+          - Polite — these are other people's hard work
+          - Place touches at narrative beats, not randomly
+          - Do NOT add ornament to technical tables, code blocks, or data
+          - Do NOT change any facts, numbers, links, or mermaid blocks
+          - Do NOT add more than 15 touches — restraint is elegance
+          - The title should be creative (not "NLPM Audit of X" — something that hints at the story)
+          - The closing paragraph deserves a memorable final line
+
+          ## Process
+
+          1. Read the article
+          2. Identify the 10-15 best spots for literary touches
+          3. Apply edits using the Edit tool
+          4. Do NOT rewrite sections — add phrases, swap adjectives, insert one-liners
+          POLISH_EOF
+
+      - name: Polish with Claude Code
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt_file: /tmp/polish-prompt.md
+          allowed_tools: Read,Edit,Grep
+
+      - name: Validate mermaid syntax
+        env:
+          TARGET_REPO: ${{ steps.target.outputs.repo }}
+        run: |
+          SLUG="${TARGET_REPO//\//-}"
+          ARTICLE="case-studies/${SLUG}.md"
+
+          if [ ! -f "$ARTICLE" ]; then
+            echo "No article — skipping mermaid validation"
+            exit 0
+          fi
+
+          # Extract all mermaid blocks
+          python3 << 'PYEOF'
+          import re, sys, os, subprocess, json
+
+          slug = os.environ.get("TARGET_REPO", "").replace("/", "-")
+          path = f"case-studies/{slug}.md"
+
+          with open(path) as f:
+              content = f.read()
+
+          blocks = re.findall(r'```mermaid\n(.*?)```', content, re.DOTALL)
+
+          if not blocks:
+              print("No mermaid blocks found")
+              sys.exit(0)
+
+          print(f"Found {len(blocks)} mermaid block(s)")
+          errors = []
+
+          for i, block in enumerate(blocks):
+              # Basic syntax checks
+              block_stripped = block.strip()
+              first_line = block_stripped.split('\n')[0].strip()
+
+              valid_starts = ['graph ', 'flowchart ', 'sequenceDiagram', 'classDiagram',
+                              'stateDiagram', 'erDiagram', 'gantt', 'pie ', 'pie\n',
+                              'journey', 'gitGraph', 'mindmap', 'timeline',
+                              'quadrantChart', 'xychart', 'sankey', 'block']
+
+              if not any(first_line.startswith(s) or first_line == s.strip() for s in valid_starts):
+                  errors.append(f"Block {i+1}: unrecognized diagram type '{first_line}'")
+                  continue
+
+              # Gantt-specific checks
+              if first_line == 'gantt':
+                  if 'dateFormat' not in block_stripped:
+                      errors.append(f"Block {i+1} (gantt): missing dateFormat")
+                  if 'section' not in block_stripped:
+                      errors.append(f"Block {i+1} (gantt): missing section")
+
+              # Pie-specific checks
+              if first_line.startswith('pie'):
+                  lines = [l.strip() for l in block_stripped.split('\n')[1:] if l.strip()]
+                  for line in lines:
+                      if line.startswith('"') and ':' not in line:
+                          errors.append(f"Block {i+1} (pie): malformed entry '{line}' — needs : value")
+
+              # Sequence diagram checks
+              if first_line == 'sequenceDiagram':
+                  if 'participant' not in block_stripped and '->>' not in block_stripped:
+                      errors.append(f"Block {i+1} (sequence): no participants or messages")
+
+              # Graph/flowchart checks
+              if first_line.startswith('graph') or first_line.startswith('flowchart'):
+                  if '-->' not in block_stripped and '---' not in block_stripped:
+                      errors.append(f"Block {i+1} (graph): no edges defined")
+
+              print(f"Block {i+1} ({first_line}): basic syntax OK")
+
+          if errors:
+              print(f"\nERRORS FOUND ({len(errors)}):")
+              for e in errors:
+                  print(f"  - {e}")
+              # Write errors for the fix step
+              with open('/tmp/mermaid-errors.txt', 'w') as f:
+                  f.write('\n'.join(errors))
+              sys.exit(1)
+          else:
+              print("\nAll mermaid blocks passed validation")
+          PYEOF
+
+      - name: Fix mermaid errors (if any)
+        if: failure()
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Mermaid syntax errors were found in the case study article.
+            Read /tmp/mermaid-errors.txt for the error list.
+            Read the article and fix each mermaid block that has errors.
+            Common fixes:
+            - gantt: add dateFormat YYYY-MM-DD HH:mm and axisFormat %H:%M
+            - pie: ensure every entry has "label" : value format
+            - graph: ensure edges use --> or ---
+            - sequenceDiagram: ensure participants are declared
+            Do NOT change any non-mermaid content.
+          allowed_tools: Read,Edit,Grep
 
       - name: Generate cover image
         env:
