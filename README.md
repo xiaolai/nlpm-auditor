@@ -1,8 +1,8 @@
 # nlpm-auditor
 
-Automated pipeline for discovering, auditing, and contributing to Claude Code plugin and skill repos across GitHub.
+*A health inspector for the Claude Code ecosystem — making the rounds so the restaurants don't have to wonder about their own kitchens.*
 
-Uses [NLPM](https://github.com/xiaolai/nlpm-for-claude) scoring (50 rules, 100-point scale) and [claude-code-action](https://github.com/anthropics/claude-code-action) for automated analysis.
+Automated pipeline for discovering, auditing, and contributing to Claude Code plugin and skill repos across GitHub. Uses [NLPM](https://github.com/xiaolai/nlpm-for-claude) scoring (50 rules, 100-point scale) and [claude-code-action](https://github.com/anthropics/claude-code-action) for automated analysis.
 
 ## How It Works
 
@@ -36,11 +36,11 @@ graph LR
 
 | Workflow | Trigger | What it does |
 |----------|---------|-------------|
-| `discover.yml` | Weekly cron / manual | Searches GitHub for Claude Code repos with 500+ stars and 5+ NL artifacts |
-| `audit.yml` | Issue labeled `audit-ready` | Clones repo, runs NLPM scoring via claude-code-action, writes audit report |
-| `contribute.yml` | Issue labeled `contribute-approved` | Forks repo, creates PRs for verified bugs only (max 5) |
-| `track.yml` | Weekly cron | Checks PR status, marks case study candidates when PRs merge |
-| `case-study.yml` | Issue labeled `case-study-ready` | Gathers GitHub evidence, writes article via claude-code-action, generates cover image via DALL-E, commits and closes |
+| `discover.yml` | Weekly cron / manual | Trawls GitHub for Claude Code repos with 500+ stars and 5+ NL artifacts — casting the net |
+| `audit.yml` | Issue labeled `audit-ready` | Clones the repo and gives it a physical — NLPM scores every artifact, writes the diagnosis |
+| `contribute.yml` | Issue labeled `contribute-approved` | Knocks on the maintainer's door with a fix — forks, branches, PRs for verified bugs only (max 5) |
+| `track.yml` | Weekly cron | Checks the mailbox — did the maintainer merge, close, or ignore? Updates the registry |
+| `case-study.yml` | Issue labeled `case-study-ready` | Writes up the story — gathers evidence, drafts article, polishes prose, paints the cover, commits the whole thing |
 
 ## Issue Label Lifecycle
 
@@ -74,33 +74,34 @@ stateDiagram-v2
 
 ## Case Study Generation
 
-When the `case-study-ready` label is applied, `case-study.yml`:
+Every good audit deserves a good story. When `case-study-ready` is applied, the pipeline writes one:
 
-1. **Gathers evidence** from GitHub API:
-   - Repo metadata (stars, description, owner)
-   - All PRs we submitted (states, timestamps, URLs)
-   - Tracking issues
+1. **Gathers evidence** — like a journalist assembling source material before writing a word:
+   - Repo metadata, all PRs (states, timestamps, URLs), tracking issues
    - Commits mentioning NLPM or Claude co-authorship
-   - Maintainer review comments on each PR
+   - Maintainer review comments — what they said matters more than what we said
    - The original audit report
 
-2. **Writes the article** via claude-code-action following a proven template:
-   - Disclosure, project context, audit results (with mermaid pie chart)
-   - PRs submitted, maintainer response, patterns observed
-   - Timeline (mermaid gantt chart), limitations, significance
+2. **Writes the draft** — claude-code-action follows a proven template (disclosure, audit results with mermaid charts, PRs submitted, maintainer response, timeline, limitations)
 
-3. **Generates a cover image** via OpenAI DALL-E API
+3. **Polishes the prose** — a second pass adds literary texture: similes, metaphors, punch lines. Restraint is elegance — 8-15 touches, no more
 
-4. **Commits** article + image to `case-studies/`, updates registry, closes the issue
+4. **Validates mermaid** — every diagram block is syntax-checked; broken ones get fixed automatically
+
+5. **Paints the cover** — DALL-E generates an editorial illustration in warm amber and navy
+
+6. **Commits the package** — article + image to `case-studies/`, registry updated, issue closed. The story tells itself from that point on.
 
 ## Rules of Engagement
 
-1. **Only submit PRs for verified bugs** — missing fields that break registration, tools called but not in allowed-tools, broken references
-2. **Never PR convention preferences** — YAML format, missing examples, vague language, model tier
-3. **One tracking issue first** — explain methodology before PRs
-4. **Max 5 PRs per repo** — focused, minimal diffs
-5. **Max 2 repos per week** — don't carpet-bomb
-6. **Accept "no" gracefully** — close PRs, thank, learn
+We're guests in other people's repos. Behave accordingly.
+
+1. **Only submit PRs for verified bugs** — the kind that break things, not the kind that offend your taste
+2. **Never PR convention preferences** — if their YAML works, it's their YAML
+3. **One tracking issue first** — introduce yourself before rearranging the furniture
+4. **Max 5 PRs per repo** — a focused visit, not a renovation
+5. **Max 2 repos per week** — good neighbors don't ring every doorbell on the street
+6. **Accept "no" gracefully** — close the PR, say thank you, and take the lesson home
 
 ## Setup
 
@@ -115,10 +116,13 @@ When the `case-study-ready` label is applied, `case-study.yml`:
 ## Directory Structure
 
 ```
-registry/repos.json    — Tracking database (all discovered repos + status)
-audits/                — Generated audit reports (one per repo)
-case-studies/          — Published case studies with cover images
+registry/repos.json          — The patient file: every repo we've met and where it is in the pipeline
+audits/                      — The X-rays: per-repo scoring reports
+case-studies/                — The published stories: date-prefixed articles
+case-studies/images/         — Cover art: compressed, date-prefixed
 ```
+
+Naming convention: `YYYY-MM-DD-owner-name.md` and `YYYY-MM-DD-owner-name-cover.png`
 
 ## Prerequisites
 

@@ -53,7 +53,7 @@ track.yml (weekly cron)
 
 ## Filtering Rules
 
-A repo is audit-worthy when ALL of these are true:
+Not every popular repo deserves a house call. A repo is audit-worthy when ALL of these are true:
 - Has `.claude-plugin/plugin.json` OR `agents/*.md` OR `commands/*.md` OR `skills/**/SKILL.md`
 - 500+ stars
 - Updated in last 60 days
@@ -80,12 +80,14 @@ Do NOT submit PRs for:
 
 ## Etiquette
 
-1. One tracking issue first — always. Explain tool, methodology, findings.
-2. Max 5 PRs per repo — focused on verified bugs only.
-3. Wait for maintainer response on tracking issue before submitting PRs.
-4. Accept "no" gracefully — close PRs, thank, learn.
+Think of it like visiting someone's home with a toolbox — you were invited by the open-source license, but you're still a guest.
+
+1. One tracking issue first — always. Knock before entering.
+2. Max 5 PRs per repo — fix the leaking tap, don't remodel the kitchen.
+3. Wait for maintainer response before submitting PRs. Patience is politeness.
+4. Accept "no" gracefully — their house, their rules.
 5. Credit the project — the audit validates NLPM, not the other way around.
-6. Never submit to more than 2 repos in the same week.
+6. Never submit to more than 2 repos in the same week. Even a welcome guest can overstay.
 
 ## Build & Run
 
@@ -96,7 +98,7 @@ Requires:
 
 ## Commands
 
-No slash commands. Everything is driven by GitHub Actions + issue labels.
+No slash commands. Everything is driven by GitHub Actions + issue labels. The human steers; the pipeline rows.
 
 ## Testing
 

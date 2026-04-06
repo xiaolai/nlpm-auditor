@@ -314,13 +314,16 @@ jobs:
             Do NOT change any non-mermaid content.
           allowed_tools: Read,Edit,Grep
 
-      - name: Generate cover image
+      - name: Generate and compress cover image
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           TARGET_REPO: ${{ steps.target.outputs.repo }}
         run: |
           SLUG="${TARGET_REPO//\//-}"
+          DATE=$(date +%Y-%m-%d)
+          mkdir -p case-studies/images
 
+          # Generate via DALL-E
           curl -s https://api.openai.com/v1/images/generations \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $OPENAI_API_KEY" \
@@ -336,22 +339,50 @@ jobs:
           if 'data' in data and data['data']:
               img = data['data'][0]
               if 'b64_json' in img:
-                  with open('case-studies/${SLUG}-cover.png', 'wb') as f:
+                  with open('/tmp/cover-raw.png', 'wb') as f:
                       f.write(base64.b64decode(img['b64_json']))
                   print('saved')
-          " 2>/dev/null || echo "Cover image skipped"
+          " 2>/dev/null || echo "Cover image generation failed"
 
-          # Insert image after title if both exist
-          if [ -f "case-studies/${SLUG}-cover.png" ] && [ -f "case-studies/${SLUG}.md" ]; then
-            python3 << 'PYEOF'
-          import re, sys, os
-          slug = os.environ.get("SLUG", "")
-          path = f"case-studies/{slug}.md"
-          with open(path) as f:
+          # Compress PNG (try pngquant, fall back to python PIL, fall back to raw copy)
+          IMG_DEST="case-studies/images/${DATE}-${SLUG}-cover.png"
+          if [ -f /tmp/cover-raw.png ]; then
+            if command -v pngquant &>/dev/null; then
+              pngquant --quality=65-80 --output "$IMG_DEST" /tmp/cover-raw.png 2>/dev/null && echo "Compressed with pngquant"
+            elif python3 -c "from PIL import Image" 2>/dev/null; then
+              python3 -c "
+          from PIL import Image
+          img = Image.open('/tmp/cover-raw.png')
+          img = img.convert('RGB')
+          img.save('${IMG_DEST}'.replace('.png', '.jpg'), 'JPEG', quality=75, optimize=True)
+          " 2>/dev/null && IMG_DEST="${IMG_DEST%.png}.jpg" && echo "Compressed with PIL to JPEG"
+            else
+              cp /tmp/cover-raw.png "$IMG_DEST" && echo "No compression tool — raw copy"
+            fi
+
+            RAW_SIZE=$(stat -f%z /tmp/cover-raw.png 2>/dev/null || stat -c%s /tmp/cover-raw.png 2>/dev/null || echo "?")
+            FINAL_SIZE=$(stat -f%z "$IMG_DEST" 2>/dev/null || stat -c%s "$IMG_DEST" 2>/dev/null || echo "?")
+            echo "Image: $RAW_SIZE -> $FINAL_SIZE bytes"
+          fi
+
+          # Rename article with date prefix
+          OLD_ARTICLE="case-studies/${SLUG}.md"
+          NEW_ARTICLE="case-studies/${DATE}-${SLUG}.md"
+          if [ -f "$OLD_ARTICLE" ]; then
+            mv "$OLD_ARTICLE" "$NEW_ARTICLE"
+          fi
+
+          # Insert image reference after title
+          IMG_BASENAME=$(basename "$IMG_DEST")
+          if [ -f "$IMG_DEST" ] && [ -f "$NEW_ARTICLE" ]; then
+            python3 << PYEOF
+          import re, os
+          article = "${NEW_ARTICLE}"
+          img_ref = "images/${IMG_BASENAME}"
+          with open(article) as f:
               content = f.read()
-          img_line = f"\n\n![Cover]({slug}-cover.png)"
-          content = re.sub(r'^(# .+)$', r'\1' + img_line, content, count=1, flags=re.MULTILINE)
-          with open(path, 'w') as f:
+          content = re.sub(r'^(# .+)$', r'\1\n\n![Cover](' + img_ref + ')', content, count=1, flags=re.MULTILINE)
+          with open(article, 'w') as f:
               f.write(content)
           PYEOF
           fi
@@ -363,17 +394,18 @@ jobs:
           ISSUE_NUM: ${{ steps.target.outputs.issue }}
         run: |
           SLUG="${TARGET_REPO//\//-}"
+          DATE=$(date +%Y-%m-%d)
 
           git config user.name "nlpm-auditor[bot]"
           git config user.email "nlpm-auditor[bot]@users.noreply.github.com"
-          git add case-studies/ registry/
+          git add case-studies/
           git diff --cached --quiet || {
             git commit -m "case-study: $TARGET_REPO"
             git push
           }
 
           # Update registry
-          jq --arg name "$TARGET_REPO" --arg cs "case-studies/${SLUG}.md" \
+          jq --arg name "$TARGET_REPO" --arg cs "case-studies/${DATE}-${SLUG}.md" \
              '.repos[$name].status = "complete" | .repos[$name].case_study = $cs' \
              registry/repos.json > /tmp/reg.json && mv /tmp/reg.json registry/repos.json
 
@@ -388,7 +420,7 @@ jobs:
           [ -f /tmp/case-study-summary.txt ] && SUMMARY=$(cat /tmp/case-study-summary.txt)
 
           gh issue comment "$ISSUE_NUM" \
-            --body "Case study published: [case-studies/${SLUG}.md](case-studies/${SLUG}.md) — ${SUMMARY}" \
+            --body "Case study published: [case-studies/${DATE}-${SLUG}.md](case-studies/${DATE}-${SLUG}.md) — ${SUMMARY}" \
             2>/dev/null || true
           gh issue edit "$ISSUE_NUM" --add-label "complete" --remove-label "case-study-ready" 2>/dev/null || true
           gh issue close "$ISSUE_NUM" --reason completed 2>/dev/null || true
