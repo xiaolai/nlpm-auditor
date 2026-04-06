@@ -41,6 +41,7 @@ graph LR
 | `contribute.yml` | Issue labeled `contribute-approved` | Knocks on the maintainer's door with a fix — forks, branches, PRs for verified bugs only (max 5) |
 | `track.yml` | Weekly cron | Checks the mailbox — did the maintainer merge, close, or ignore? Updates the registry |
 | `case-study.yml` | Issue labeled `case-study-ready` | Writes up the story — gathers evidence, drafts article, polishes prose, paints the cover, commits the whole thing |
+| `daily-report.yml` | Daily 22:00 UTC / manual | Takes the pulse — pipeline state, PR scorecard, rule frequency, rejection lessons, self-evolution signals |
 
 ## Issue Label Lifecycle
 
@@ -116,13 +117,29 @@ We're guests in other people's repos. Behave accordingly.
 ## Directory Structure
 
 ```
-registry/repos.json          — The patient file: every repo we've met and where it is in the pipeline
+registry/repos.json          — The patient file: every repo and where it is in the pipeline
 audits/                      — The X-rays: per-repo scoring reports
 case-studies/                — The published stories: date-prefixed articles
 case-studies/images/         — Cover art: compressed, date-prefixed
+reports/                     — Daily health checks: pipeline state + self-evolution signals
+feedback/log.json            — The learning journal: rule stats, PR outcomes, rejection patterns
 ```
 
-Naming convention: `YYYY-MM-DD-owner-name.md` and `YYYY-MM-DD-owner-name-cover.png`
+Naming: `YYYY-MM-DD-owner-name.md`, `YYYY-MM-DD-owner-name-cover.png`, `YYYY-MM-DD.md` (reports)
+
+## Self-Evolution
+
+The daily report tracks signals that should feed back into NLPM itself:
+
+| Signal | What it means | Action |
+|--------|--------------|--------|
+| Rule fires 20+ times across audits | Might be noise, not signal | Review rule — is it finding real bugs or just being pedantic? |
+| PR rejected by maintainer | NLPM flagged something the maintainer considers valid | Soften or remove the rule (like scalar-string `tools:` → nlpm v0.7.0) |
+| PR merged by maintainer | Rule found a real bug | Protect this rule — it earns its keep |
+| Same defect pattern in 3+ repos | Ecosystem-wide issue | Consider adding a new rule to the 50 |
+| Acceptance rate dropping | NLPM is drifting toward opinions | Tighten the bug-vs-convention filter |
+
+The feedback loop: **audit → contribute → track outcomes → update NLPM rules → audit better next time.**
 
 ## Prerequisites
 
